@@ -14,6 +14,9 @@ export const commands = [
     .addStringOption(o => o.setName('enlace').setDescription('Enlace HTTP o HTTPS del anuncio.').setMaxLength(512))
     .addStringOption(o => o.setName('boton').setDescription('Texto del botón de enlace.').setMaxLength(80))
     .addStringOption(o => o.setName('emoji').setDescription('Emoji del botón: Unicode, <:nombre:ID> o ID de Discord.').setMaxLength(100))
+    .addStringOption(o => o.setName('estilo_boton').setDescription('Color del primer botón; los coloreados muestran el enlace en privado.').addChoices(
+      { name: 'Enlace directo (gris)', value: 'link' }, { name: 'Azul violáceo', value: 'primary' },
+      { name: 'Gris', value: 'secondary' }, { name: 'Verde', value: 'success' }, { name: 'Rojo', value: 'danger' }))
     .addBooleanOption(o => o.setName('editor').setDescription('Abre la vista previa para añadir botones y elegir un color antes de publicar.')),
   new SlashCommandBuilder().setName('verificacion').setDescription('Publica el panel con el botón de verificación.')
     .setDMPermission(false).setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)

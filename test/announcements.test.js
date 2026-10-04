@@ -1,9 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ChannelType, PermissionFlagsBits, PermissionsBitField } from 'discord.js';
 import { commands } from '../src/commands.js';
 import { handleInteraction } from '../src/handlers.js';
 import { announcementPayload, colorPalette, parseButtonEmoji, validateAnnouncement } from '../src/announcements.js';
+import { createLinkStore } from '../src/announcement-links.js';
 
 const config = { guildId: '123456789012345678' };
 const base = { title: 'Nueva versión', body: 'Descarga disponible', importance: 'novedad', color: '', url: '', label: '' };
@@ -37,7 +41,7 @@ function fixture(options = {}) {
     return { ...interaction, options: undefined, commandName: undefined, deferred: false, replied: false, customId,
       isChatInputCommand: () => false, isButton: () => kind === 'button',
       isModalSubmit: () => kind === 'form', isChannelSelectMenu: () => kind === 'channel',
-      isStringSelectMenu: () => ['importance', 'palette', 'buttonslot'].includes(kind), isFromMessage: () => false,
+      isStringSelectMenu: () => ['importance', 'palette', 'buttonslot', 'emoji'].includes(kind), isFromMessage: () => false,
       reply: async payload => { state.replies.push(payload); },
       deferReply: async function () { this.deferred = true; },
       deferUpdate: async function () { this.deferred = true; }, ...extra };
@@ -46,7 +50,8 @@ function fixture(options = {}) {
 }
 
 function fields(values, attachment) {
-  return { getTextInputValue: key => values[key] || '', getUploadedFiles: () => attachment ? { first: () => attachment } : null };
+  return { getTextInputValue: key => values[key] || '', getUploadedFiles: () => attachment ? { first: () => attachment } : null,
+    getStringSelectValues: key => [values[key] || (key === 'style' ? 'link' : 'text')] };
 }
 
 test('Parámetros opcionales conservan publicación directa, imagen, enlace y color', async () => {
@@ -315,4 +320,101 @@ test('Paleta muestra muestras y códigos, aplica color, permite personalizar y r
   assert.equal(state.replies.at(-1).embeds[0].toJSON().color, 0);
   await handleInteraction(component(`takumi:announcement:palette:${id}`, 'palette', { values: ['automatic'] }), config);
   assert.equal(state.replies.at(-1).embeds[0].toJSON().color, 0xe74c3c);
+});
+
+test('Los cuatro colores y el enlace directo producen componentes válidos', () => {
+  const styles = ['primary', 'secondary', 'success', 'danger', 'link'];
+  const payload = announcementPayload({ ...base, buttons: styles.map(style => ({ style, label: style, url: 'https://example.com', emoji: '🔗' })) }, false, slot => `test:${slot}`);
+  const components = payload.components[0].toJSON().components;
+  assert.deepEqual(components.map(button => button.style), [1, 2, 3, 4, 5]);
+  for (let slot = 0; slot < 4; slot++) {
+    assert.equal(components[slot].url, undefined);
+    assert.equal(components[slot].custom_id, `test:${slot}`);
+  }
+  assert.equal(components[4].custom_id, undefined);
+  assert.equal(components[4].url, 'https://example.com');
+  assert.throws(() => announcementPayload({ ...base, buttons: [{ style: 'orange', url: 'https://example.com' }] }), /estilo/);
+});
+
+test('Botón coloreado conserva destino al editar y en preview responde en privado', async () => {
+  const { interaction, state, component } = fixture({ canal: true, titulo: base.title, mensaje: base.body, editor: true,
+    enlace: 'https://youtube.com/@Takumi', boton: 'YouTube', estilo_boton: 'danger' });
+  await handleInteraction(interaction, config);
+  let button = state.replies.at(-1).components[0].toJSON().components[0];
+  assert.equal(button.style, 4);
+  const openId = button.custom_id;
+  await handleInteraction(component(openId), config);
+  assert.equal(state.replies.at(-1).flags, 64);
+  assert.equal(state.replies.at(-1).components[0].toJSON().components[0].url, 'https://youtube.com/@Takumi');
+  const id = openId.split(':')[3];
+  await handleInteraction(component(`takumi:announcement:form:${id}`, 'form', { fields: fields({ ...base, url: 'https://youtube.com/@Takumi', label: 'YouTube editado' }), isFromMessage: () => true }), config);
+  button = state.replies.at(-1).components[0].toJSON().components[0];
+  assert.equal(button.style, 4);
+  assert.equal(button.label, 'YouTube editado');
+});
+
+test('Botones publicados funcionan sin Gestionar servidor, tras reabrir el almacén y sin el borrador', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'takumi-links-test-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const localConfig = { ...config, linkStore: createLinkStore(directory) };
+  const { interaction, state, component } = fixture({ canal: true, titulo: base.title, mensaje: base.body,
+    enlace: 'https://example.com/mod', boton: 'Modrinth', estilo_boton: 'success' });
+  await handleInteraction(interaction, localConfig);
+  assert.equal(state.sent.length, 1);
+  const button = state.sent[0].components[0].toJSON().components[0];
+  assert.equal(button.style, 3);
+  assert.match(button.custom_id, /^takumi:link:v1:/);
+  const reopened = { ...config, linkStore: createLinkStore(directory) };
+  await handleInteraction(component(button.custom_id, 'button', { memberPermissions: new PermissionsBitField(), user: { id: 'ordinary-member' } }), reopened);
+  const reply = state.replies.at(-1);
+  assert.equal(reply.components[0].toJSON().components[0].url, 'https://example.com/mod');
+  assert.equal(reply.allowedMentions.parse.length, 0);
+  assert.equal(state.sent.length, 1);
+  await handleInteraction(component(button.custom_id, 'button', { guildId: 'other' }), reopened);
+  assert.match(state.replies.at(-1).content, /solo está configurado/);
+  await handleInteraction(component('takumi:link:v1:00000000-0000-0000-0000-000000000000:0'), reopened);
+  assert.match(state.replies.at(-1).content, /No se encuentra/);
+  assert.equal(await reopened.linkStore.load('../outside'), null);
+});
+
+test('No publica botones coloreados si falla el almacenamiento duradero', async () => {
+  const { interaction, state } = fixture({ canal: true, titulo: base.title, mensaje: base.body, enlace: 'https://example.com', estilo_boton: 'primary' });
+  await handleInteraction(interaction, { ...config, linkStore: { save: async () => { throw new Error('Almacenamiento no disponible.'); } } });
+  assert.equal(state.sent.length, 0);
+  assert.match(state.replies.at(-1).content, /Almacenamiento/);
+});
+
+test('Selector del formulario muestra emojis de Discord y catálogo paginado permite llegar a todos', async () => {
+  const { interaction, state, component } = fixture({ canal: true, titulo: base.title, mensaje: base.body, editor: true });
+  const cache = new Map(Array.from({ length: 60 }, (_, index) => {
+    const id = String(123456789012345678n + BigInt(index));
+    return [id, { id, name: `emoji_${index}`, animated: index % 2 === 0, available: true }];
+  }));
+  interaction.guild.emojis = { cache, fetch: async () => cache };
+  await handleInteraction(interaction, config);
+  const id = state.replies.at(-1).components.at(-1).toJSON().components[0].custom_id.split(':').at(-1);
+  await handleInteraction(component(`takumi:announcement:buttonslot:${id}`, 'buttonslot', { values: ['0'] }), config);
+  assert.equal(state.modal.components.length, 5);
+  const style = state.modal.components[3].component;
+  assert.deepEqual(style.options.map(option => option.value), ['link', 'primary', 'secondary', 'success', 'danger']);
+  const picker = state.modal.components[4].component;
+  assert.equal(picker.options.length, 25);
+  assert.equal(picker.options[3].emoji.id, [...cache.keys()][0]);
+  const chosen = picker.options[3].value;
+  await handleInteraction(component(state.modal.custom_id, 'form', { fields: fields({ label: 'Canal', url: 'https://example.com', style: 'danger', emojiChoice: chosen }), isFromMessage: () => true }), config);
+  assert.equal(state.replies.at(-1).components[0].toJSON().components[0].emoji.id, [...cache.keys()][0]);
+  await handleInteraction(component(`takumi:announcement:buttonslot:${id}`, 'buttonslot', { values: ['0'] }), config);
+  await handleInteraction(component(state.modal.custom_id, 'form', { fields: fields({ label: 'Canal', url: 'https://example.com', style: 'danger', emojiChoice: 'catalog' }), isFromMessage: () => true }), config);
+  let panel = state.replies.at(-1);
+  assert.match(panel.content, /página 1\/4/);
+  assert.equal(panel.components[0].toJSON().components[0].options.length, 25);
+  const next = panel.components[1].toJSON().components[1].custom_id;
+  await handleInteraction(component(next), config);
+  panel = state.replies.at(-1);
+  assert.match(panel.content, /página 2\/4/);
+  const selection = panel.components[0].toJSON().components[0];
+  const target = selection.options.at(-1);
+  await handleInteraction(component(selection.custom_id, 'emoji', { values: [target.value] }), config);
+  assert.equal(state.replies.at(-1).components[0].toJSON().components[0].emoji.id, target.emoji.id);
+  assert.equal(state.replies.at(-1).components[0].toJSON().components[0].style, 4);
 });

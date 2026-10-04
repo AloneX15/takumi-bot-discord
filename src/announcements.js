@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { announcementLinks } from './announcement-links.js';
 import {
   ActionRowBuilder, ButtonBuilder, ButtonStyle, ChannelSelectMenuBuilder, ChannelType,
   EmbedBuilder, FileUploadBuilder, LabelBuilder, MessageFlags, ModalBuilder, PermissionFlagsBits, StringSelectMenuBuilder,
@@ -6,10 +7,23 @@ import {
 } from 'discord.js';
 
 const PREFIX = 'takumi:announcement:';
+const LINK_PREFIX = 'takumi:link:v1:';
 const drafts = new Map();
 const TTL = 15 * 60 * 1000;
 const IMAGE_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' };
 const MAX_IMAGE_SIZE = 10 * 1024 * 1024;
+export const buttonStyles = {
+  link: { label: 'Enlace directo (gris)', style: ButtonStyle.Link, emoji: '🔗' },
+  primary: { label: 'Azul violáceo', style: ButtonStyle.Primary, emoji: '🔵' },
+  secondary: { label: 'Gris', style: ButtonStyle.Secondary, emoji: '⚪' },
+  success: { label: 'Verde', style: ButtonStyle.Success, emoji: '🟢' },
+  danger: { label: 'Rojo', style: ButtonStyle.Danger, emoji: '🔴' },
+};
+const commonEmojis = [
+  ['🔗', 'Enlace'], ['▶️', 'Vídeo'], ['📺', 'Canal'], ['🎮', 'Juegos'], ['📥', 'Descargar'],
+  ['🚀', 'Lanzamiento'], ['💜', 'Corazón morado'], ['💚', 'Corazón verde'], ['❤️', 'Corazón rojo'],
+  ['🟠', 'Naranja'], ['⭐', 'Estrella'], ['📢', 'Anuncio'], ['🔥', 'Fuego'], ['✅', 'Confirmación'],
+].map(([value, label]) => ({ value, label, emoji: { name: value } }));
 export const colorPalette = [
   { label: 'Azul', value: '#3498DB', emoji: '🔵' },
   { label: 'Verde', value: '#2ECC71', emoji: '🟢' },
@@ -35,7 +49,7 @@ export function validateAnnouncement(data, complete = true) {
   if ((data.title?.length ?? 0) > 256 || (data.body?.length ?? 0) > 4000) throw new Error('El título admite 256 caracteres y el mensaje 4000.');
   if (!Object.hasOwn(importanceLevels, data.importance)) throw new Error('Selecciona una importancia válida.');
   if (data.color && !/^#[\da-f]{6}$/i.test(data.color)) throw new Error('El color debe tener el formato #FF8800.');
-  validateLinkButton({ url: data.url, label: data.label, emoji: data.emoji }, complete);
+  validateLinkButton({ url: data.url, label: data.label, emoji: data.emoji, style: data.buttonStyle }, complete);
   if (data.buttons) {
     if (!Array.isArray(data.buttons) || data.buttons.length > 5) throw new Error('El anuncio admite hasta 5 botones.');
     for (const button of data.buttons) if (button) validateLinkButton(button);
@@ -54,6 +68,7 @@ export function parseButtonEmoji(value = '') {
 }
 
 function validateLinkButton(data, complete = true) {
+  if (!Object.hasOwn(buttonStyles, data.style || 'link')) throw new Error('Selecciona un estilo de botón válido.');
   if (data.url) {
     let url;
     try { url = new URL(data.url); } catch { throw new Error('Introduce un enlace HTTP o HTTPS válido.'); }
@@ -66,13 +81,13 @@ function validateLinkButton(data, complete = true) {
 }
 
 function linkButtons(data) {
-  return data.buttons || (data.url ? [{ url: data.url, label: data.label, emoji: data.emoji }] : []);
+  return data.buttons || (data.url ? [{ url: data.url, label: data.label, emoji: data.emoji, style: data.buttonStyle || 'link' }] : []);
 }
 
 function setFirstButton(data, button) {
   const buttons = [...linkButtons(data)];
   buttons[0] = button?.url ? button : null;
-  return { ...data, buttons, url: button?.url || '', label: button?.label || '', emoji: button?.emoji || '' };
+  return { ...data, buttons, url: button?.url || '', label: button?.label || '', emoji: button?.emoji || '', buttonStyle: button?.style || 'link' };
 }
 
 function applyImage(data, attachment, sizeLimit = MAX_IMAGE_SIZE) {
@@ -81,7 +96,7 @@ function applyImage(data, attachment, sizeLimit = MAX_IMAGE_SIZE) {
   return { ...data, image: attachment.url, imageAttachment: { url: attachment.url, contentType: attachment.contentType, size: attachment.size } };
 }
 
-export function announcementPayload(data, uploadImage = false) {
+export function announcementPayload(data, uploadImage = false, buttonId = (slot => `${PREFIX}unavailable:preview:${slot}`)) {
   validateAnnouncement(data);
   const level = importanceLevels[data.importance];
   const embed = new EmbedBuilder().setTitle(data.title).setDescription(data.body)
@@ -95,11 +110,15 @@ export function announcementPayload(data, uploadImage = false) {
       embed.setImage(`attachment://${name}`);
     } else embed.setImage(data.image);
   }
-  const buttons = linkButtons(data).filter(Boolean).map(button => {
-    const builder = new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel(button.label || 'Abrir enlace').setURL(button.url);
+  const buttons = linkButtons(data).map((button, slot) => {
+    if (!button) return null;
+    const style = buttonStyles[button.style || 'link'].style;
+    const builder = new ButtonBuilder().setStyle(style).setLabel(button.label || 'Abrir enlace');
+    if (style === ButtonStyle.Link) builder.setURL(button.url);
+    else builder.setCustomId(buttonId(slot));
     if (button.emoji) builder.setEmoji(parseButtonEmoji(button.emoji));
     return builder;
-  });
+  }).filter(Boolean);
   const components = buttons.length ? [new ActionRowBuilder().addComponents(buttons)] : [];
   return { embeds: [embed], components, ...(files.length ? { files } : {}), allowedMentions: { parse: [] } };
 }
@@ -127,13 +146,49 @@ function modal(id, data) {
   return form;
 }
 
-function buttonModal(id, slot, data, values) {
+function emojiOptions(guild) {
+  const server = [...(guild.emojis?.cache?.values() || [])].filter(emoji => emoji.available !== false).map(emoji => ({
+    label: emoji.name || 'Emoji del servidor', value: `<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}>`,
+    emoji: { id: emoji.id, name: emoji.name, animated: Boolean(emoji.animated) },
+  }));
+  return [...server, ...commonEmojis];
+}
+
+function buttonModal(id, slot, data, values, guild) {
   const button = values || linkButtons(data)[slot] || {};
   const form = new ModalBuilder().setCustomId(`${PREFIX}buttonform:${id}:${slot}`).setTitle(`Botón ${slot + 1}`);
   addText(form, 'label', 'Texto (vacío: Abrir enlace)', 80, false, TextInputStyle.Short, button.label);
   addText(form, 'url', 'Enlace (vacío: eliminar este botón)', 512, false, TextInputStyle.Short, button.url, 'https://...');
   addText(form, 'emoji', 'Emoji Unicode o personalizado (opcional)', 100, false, TextInputStyle.Short, button.emoji, '🔗 o <:nombre:123456789012345678>');
+  const style = new StringSelectMenuBuilder().setCustomId('style').setRequired(true).addOptions(
+    Object.entries(buttonStyles).map(([value, option]) => ({ label: option.label, value, emoji: option.emoji,
+      description: value === 'link' ? 'Abre la URL directamente.' : 'Muestra el enlace en privado al pulsar.', default: value === (button.style || 'link') })),
+  );
+  form.addLabelComponents(new LabelBuilder().setLabel('Color / comportamiento del botón').setStringSelectMenuComponent(style));
+  const picker = new StringSelectMenuBuilder().setCustomId('emojiChoice').setRequired(true).addOptions(
+    { label: 'Usar el emoji del campo de texto', value: 'text', emoji: '✏️', default: true },
+    { label: 'Sin emoji', value: 'none', emoji: '➖' },
+    { label: 'Ver todos los emojis…', value: 'catalog', emoji: '🔎' },
+    ...emojiOptions(guild).slice(0, 22),
+  );
+  form.addLabelComponents(new LabelBuilder().setLabel('Seleccionar emoji').setStringSelectMenuComponent(picker));
   return form;
+}
+
+function emojiPanel(id, slot, draft, page = 0) {
+  const catalog = draft.emojiCatalog;
+  const pages = Math.max(1, Math.ceil(catalog.length / 24));
+  page = Math.max(0, Math.min(page, pages - 1));
+  const picker = new StringSelectMenuBuilder().setCustomId(`${PREFIX}emoji:${id}:${slot}`).setPlaceholder('Elige un emoji').addOptions(
+    { label: 'Sin emoji', value: 'none', emoji: '➖' }, ...catalog.slice(page * 24, (page + 1) * 24),
+  );
+  return { ...announcementPayload(draft.data, false, position => `${PREFIX}open:${id}:${position}`),
+    content: `Emojis del servidor y habituales · botón ${slot + 1} · página ${page + 1}/${pages}`,
+    components: [new ActionRowBuilder().addComponents(picker), new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`${PREFIX}emojipage:${id}:${slot}:${page - 1}`).setLabel('Anterior').setStyle(ButtonStyle.Secondary).setDisabled(page === 0),
+      new ButtonBuilder().setCustomId(`${PREFIX}emojipage:${id}:${slot}:${page + 1}`).setLabel('Siguiente').setStyle(ButtonStyle.Secondary).setDisabled(page === pages - 1),
+      new ButtonBuilder().setCustomId(`${PREFIX}buttons:${id}`).setLabel('Volver a botones').setStyle(ButtonStyle.Secondary),
+    )] };
 }
 
 function colorModal(id, data, value) {
@@ -143,7 +198,7 @@ function colorModal(id, data, value) {
 }
 
 function buttonPanel(id, data) {
-  const payload = announcementPayload(data);
+  const payload = announcementPayload(data, false, slot => `${PREFIX}open:${id}:${slot}`);
   const slots = linkButtons(data);
   const select = new StringSelectMenuBuilder().setCustomId(`${PREFIX}buttonslot:${id}`)
     .setPlaceholder('Añade o edita un botón').addOptions(Array.from({ length: 5 }, (_, slot) => ({
@@ -158,7 +213,7 @@ function buttonPanel(id, data) {
 }
 
 function preview(id, data) {
-  const payload = announcementPayload(data);
+  const payload = announcementPayload(data, false, slot => `${PREFIX}open:${id}:${slot}`);
   const channel = new ChannelSelectMenuBuilder().setCustomId(`${PREFIX}channel:${id}`)
     .setPlaceholder('Selecciona el canal de publicación').setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement);
   if (data.channelId) channel.setDefaultChannels(data.channelId);
@@ -183,8 +238,8 @@ function preview(id, data) {
     components: [...payload.components, new ActionRowBuilder().addComponents(channel), new ActionRowBuilder().addComponents(importance), new ActionRowBuilder().addComponents(color), buttons] };
 }
 
-async function publish(interaction, data) {
-  const payload = announcementPayload(data, true);
+async function publish(interaction, data, config) {
+  let payload = announcementPayload(data, true);
   if (!data.channelId) throw new Error('Selecciona un canal.');
   const channel = await interaction.guild.channels.fetch(data.channelId);
   if (!channel || ![ChannelType.GuildText, ChannelType.GuildAnnouncement].includes(channel.type)) throw new Error('Selecciona un canal de texto o de anuncios del servidor.');
@@ -196,15 +251,37 @@ async function publish(interaction, data) {
   if (!channel.permissionsFor(bot)?.has([PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.EmbedLinks])) throw new Error('El bot necesita Ver canal, Enviar mensajes e Insertar enlaces en ese canal.');
   if (payload.files && !channel.permissionsFor(bot)?.has(PermissionFlagsBits.AttachFiles)) throw new Error('El bot necesita Adjuntar archivos para publicar la imagen.');
   if (data.imageAttachment?.size > (interaction.attachmentSizeLimit ?? MAX_IMAGE_SIZE)) throw new Error('La imagen supera el tamaño permitido por Discord en este servidor.');
+  if (linkButtons(data).some(button => button && button.style && button.style !== 'link')) {
+    const id = await (config.linkStore || announcementLinks).save(interaction.guildId, linkButtons(data));
+    payload = announcementPayload(data, true, slot => `${LINK_PREFIX}${id}:${slot}`);
+  }
   return channel.send(payload);
+}
+
+async function replyWithLink(interaction, button) {
+  if (!button?.url) throw new Error('Este botón ya no tiene un enlace disponible.');
+  validateLinkButton(button);
+  const payload = { content: 'Pulsa el botón para abrir el enlace.', allowedMentions: { parse: [] },
+    components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel(button.label || 'Abrir enlace').setURL(button.url))] };
+  if (interaction.deferred) await interaction.editReply(payload);
+  else await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
 }
 
 export async function handleAnnouncement(interaction, config) {
   const command = interaction.isChatInputCommand() && interaction.commandName === 'anuncio';
+  const publicLink = interaction.isButton() && interaction.customId?.startsWith(LINK_PREFIX);
   const component = (interaction.isButton() || interaction.isModalSubmit?.() || interaction.isChannelSelectMenu?.() || interaction.isStringSelectMenu?.()) && interaction.customId?.startsWith(PREFIX);
-  if (!command && !component) return false;
+  if (!command && !component && !publicLink) return false;
   try {
     if (!interaction.inGuild() || interaction.guildId !== config.guildId) throw new Error('Este bot solo está configurado para su servidor.');
+    if (publicLink) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+      const [id, slot] = interaction.customId.slice(LINK_PREFIX.length).split(':');
+      const record = await (config.linkStore || announcementLinks).load(id);
+      if (!record || record.guildId !== interaction.guildId || !/^[0-4]$/.test(slot || '')) throw new Error('No se encuentra el enlace de este botón. Comprueba que se conserve la carpeta .data del bot.');
+      await replyWithLink(interaction, record.buttons[Number(slot)]);
+      return true;
+    }
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) throw new Error('Necesitas el permiso Gestionar servidor para usar este comando.');
     for (const [key, draft] of drafts) if (draft.expires <= Date.now() && !draft.busy) drafts.delete(key);
     if (command) {
@@ -215,6 +292,7 @@ export async function handleAnnouncement(interaction, config) {
         color: interaction.options.getString('color')?.trim() || '', url: interaction.options.getString('enlace')?.trim() || '',
         label: interaction.options.getString('boton')?.trim() || '',
         emoji: interaction.options.getString('emoji')?.trim() || '',
+        buttonStyle: interaction.options.getString('estilo_boton') || 'link',
       };
       const attachment = interaction.options.getAttachment('imagen');
       if (attachment) {
@@ -223,7 +301,7 @@ export async function handleAnnouncement(interaction, config) {
       validateAnnouncement(data, false);
       if (data.channelId && data.title.trim() && data.body.trim() && !interaction.options.getBoolean('editor')) {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-        const message = await publish(interaction, data);
+        const message = await publish(interaction, data, config);
         await interaction.editReply({ content: `✅ Publicado: ${message.url}`, allowedMentions: { parse: [] } });
       } else {
         if (drafts.size >= 500) throw new Error('Hay demasiados borradores abiertos. Vuelve a intentarlo más tarde.');
@@ -234,17 +312,20 @@ export async function handleAnnouncement(interaction, config) {
       }
       return true;
     }
-    const [action, id, slotValue] = interaction.customId.slice(PREFIX.length).split(':');
+    const [action, id, slotValue, pageValue] = interaction.customId.slice(PREFIX.length).split(':');
     const draft = drafts.get(id);
     if (!draft || draft.expires <= Date.now()) throw new Error('El borrador ha caducado o el bot se ha reiniciado. Usa /anuncio de nuevo.');
     if (draft.owner !== interaction.user.id || draft.guildId !== interaction.guildId) throw new Error('Solo quien creó el anuncio puede modificarlo o publicarlo.');
     if (draft.busy) throw new Error('El anuncio ya se está publicando.');
-    if (action === 'edit' && interaction.isButton()) await interaction.showModal(modal(id, draft.data));
+    if (action === 'open' && interaction.isButton()) {
+      if (!/^[0-4]$/.test(slotValue || '')) throw new Error('Selecciona un botón válido.');
+      await replyWithLink(interaction, linkButtons(draft.data)[Number(slotValue)]);
+    } else if (action === 'edit' && interaction.isButton()) await interaction.showModal(modal(id, draft.data));
     else if (action === 'retrycolor' && interaction.isButton()) await interaction.showModal(colorModal(id, draft.data, draft.pendingColor));
     else if (action === 'retrybutton' && interaction.isButton()) {
       const slot = Number(slotValue);
       if (!/^\d$/.test(slotValue ?? '') || slot > 4 || draft.pendingButton?.slot !== slot) throw new Error('Selecciona un botón válido.');
-      await interaction.showModal(buttonModal(id, slot, draft.data, draft.pendingButton.values));
+      await interaction.showModal(buttonModal(id, slot, draft.data, draft.pendingButton.values, interaction.guild));
     } else if (action === 'buttons' && interaction.isButton()) await interaction.update(buttonPanel(id, draft.data));
     else if (action === 'back' && interaction.isButton()) await interaction.update(preview(id, draft.data));
     else if (action === 'removeimage' && interaction.isButton()) {
@@ -254,11 +335,19 @@ export async function handleAnnouncement(interaction, config) {
     } else if (action === 'buttonslot' && interaction.isStringSelectMenu?.()) {
       const slot = Number(interaction.values[0]);
       if (!Number.isInteger(slot) || slot < 0 || slot > 4) throw new Error('Selecciona un botón válido.');
-      await interaction.showModal(buttonModal(id, slot, draft.data, draft.pendingButton?.slot === slot ? draft.pendingButton.values : undefined));
+      await interaction.showModal(buttonModal(id, slot, draft.data, draft.pendingButton?.slot === slot ? draft.pendingButton.values : undefined, interaction.guild));
     } else if (action === 'buttonform' && interaction.isModalSubmit?.()) {
       const slot = Number(slotValue);
       if (!/^\d$/.test(slotValue ?? '') || slot > 4) throw new Error('Selecciona un botón válido.');
       const button = Object.fromEntries(['label', 'url', 'emoji'].map(key => [key, interaction.fields.getTextInputValue(key).trim()]));
+      button.style = interaction.fields.getStringSelectValues('style')[0];
+      const emojiChoice = interaction.fields.getStringSelectValues('emojiChoice')[0];
+      if (emojiChoice === 'none') button.emoji = '';
+      else if (emojiChoice === 'catalog') button.emoji = linkButtons(draft.data)[slot]?.emoji || '';
+      else if (!['text', 'catalog'].includes(emojiChoice)) {
+        if (!emojiOptions(interaction.guild).some(option => option.value === emojiChoice)) throw new Error('Selecciona un emoji válido del catálogo.');
+        button.emoji = emojiChoice;
+      }
       draft.pendingButton = { slot, values: button };
       // Clearing the URL explicitly removes the selected button.
       if (button.url) validateLinkButton(button);
@@ -267,9 +356,27 @@ export async function handleAnnouncement(interaction, config) {
       if (slot === 0) data = setFirstButton(data, button.url ? button : null);
       validateAnnouncement(data);
       draft.data = data;
-      delete draft.pendingButton;
       await interaction.deferUpdate();
-      await interaction.editReply(buttonPanel(id, data));
+      if (emojiChoice === 'catalog' && button.url) {
+        if (interaction.guild.emojis?.fetch) await interaction.guild.emojis.fetch();
+        draft.emojiCatalog = emojiOptions(interaction.guild);
+        await interaction.editReply(emojiPanel(id, slot, draft));
+      } else await interaction.editReply(buttonPanel(id, data));
+      delete draft.pendingButton;
+    } else if (action === 'emojipage' && interaction.isButton()) {
+      if (!/^[0-4]$/.test(slotValue || '') || !/^-?\d{1,4}$/.test(pageValue || '') || !draft.emojiCatalog) throw new Error('Abre de nuevo el selector de emojis.');
+      await interaction.update(emojiPanel(id, Number(slotValue), draft, Number(pageValue)));
+    } else if (action === 'emoji' && interaction.isStringSelectMenu?.()) {
+      const slot = Number(slotValue);
+      if (!/^[0-4]$/.test(slotValue || '') || !linkButtons(draft.data)[slot]) throw new Error('Selecciona un botón válido.');
+      const choice = interaction.values[0];
+      if (choice !== 'none' && !draft.emojiCatalog?.some(option => option.value === choice)) throw new Error('Selecciona un emoji válido del catálogo.');
+      let data = { ...draft.data, buttons: [...linkButtons(draft.data)] };
+      data.buttons[slot] = { ...data.buttons[slot], emoji: choice === 'none' ? '' : choice };
+      if (slot === 0) data = setFirstButton(data, data.buttons[slot]);
+      validateAnnouncement(data);
+      draft.data = data;
+      await interaction.update(buttonPanel(id, data));
     } else if (action === 'palette' && interaction.isStringSelectMenu?.()) {
       const choice = interaction.values[0];
       if (choice === 'custom') await interaction.showModal(colorModal(id, draft.data, draft.pendingColor));
@@ -294,7 +401,7 @@ export async function handleAnnouncement(interaction, config) {
     } else if (action === 'form' && interaction.isModalSubmit?.()) {
       let data = { ...draft.data };
       for (const key of ['title', 'body', 'url', 'label']) data[key] = interaction.fields.getTextInputValue(key).trim();
-      data = setFirstButton(data, { url: data.url, label: data.label, emoji: data.url ? data.emoji : '' });
+      data = setFirstButton(data, { url: data.url, label: data.label, emoji: data.url ? data.emoji : '', style: data.buttonStyle });
       draft.data = data;
       const uploads = interaction.fields.getUploadedFiles('image');
       const attachment = uploads?.first();
@@ -320,7 +427,7 @@ export async function handleAnnouncement(interaction, config) {
       draft.busy = true;
       try {
         await interaction.deferUpdate();
-        const message = await publish(interaction, draft.data);
+        const message = await publish(interaction, draft.data, config);
         drafts.delete(id);
         await interaction.editReply({ content: `✅ Publicado: ${message.url}`, embeds: [], components: [], allowedMentions: { parse: [] } });
       } finally { draft.busy = false; }
