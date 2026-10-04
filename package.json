@@ -1,0 +1,10 @@
+{
+  "name": "takumi-discord-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bot de anuncios y verificación de TakumiStudios",
+  "engines": { "node": ">=22.12.0" },
+  "scripts": { "start": "node --env-file=.env src/index.js", "deploy": "node --env-file=.env src/deploy.js", "test": "node --test" },
+  "dependencies": { "discord.js": "^14.27.0" }
+}
