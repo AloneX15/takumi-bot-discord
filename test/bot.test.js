@@ -14,6 +14,7 @@ function fixture({ verified = false, staff = false, guildId = config.guildId, da
   const interaction = {
     isButton: () => true, isChatInputCommand: () => false, customId: VERIFY_ID,
     deferReply: async () => {}, editReply: async reply => { state.replies.push(reply); },
+    reply: async reply => { state.replies.push(reply); },
     inGuild: () => true, guildId, user: { id: 'user' },
     memberPermissions: new PermissionsBitField(staff ? PermissionFlagsBits.ManageGuild : 0n),
     guild: { id: config.guildId, roles: { fetch: async () => role }, members: { fetchMe: async () => bot, fetch: async () => member } },
